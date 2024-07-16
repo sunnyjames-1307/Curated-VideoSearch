@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  youtube-scraper:
+    build: 
+      context: .
+    container_name: youtube_scraper
+    volumes:
+      - ./custom_cipher.py:/usr/local/lib/python3.9/site-packages/pytube/cipher.py  # Mount custom cipher.py
+      # - ./custom_innertube.py:/usr/local/lib/python3.9/site-packages/pytube/innertube.py
+      - .:/usr/src/app  # Mount your application code
+    command: python app.py
+    restart: always
+    ports:
+      - "80:80"
