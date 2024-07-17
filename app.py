@@ -3,30 +3,33 @@ import os
 import scrapetube
 from pytube import YouTube
 import vertexai
+from youtube_transcript_api import YouTubeTranscriptApi
 import tempfile
 import logging
 from google.cloud import storage
 from vertexai.generative_models import GenerativeModel, Part
-from pytube.innertube import _default_clients
+import json
 
-_default_clients["ANDROID"]["context"]["client"]["clientVersion"] = "19.08.35"
-_default_clients["IOS"]["context"]["client"]["clientVersion"] = "19.08.35"
-_default_clients["ANDROID_EMBED"]["context"]["client"]["clientVersion"] = "19.08.35"
-_default_clients["IOS_EMBED"]["context"]["client"]["clientVersion"] = "19.08.35"
-_default_clients["IOS_MUSIC"]["context"]["client"]["clientVersion"] = "6.41"
-_default_clients["ANDROID_MUSIC"] = _default_clients["ANDROID_CREATOR"]
+# from pytube.innertube import _default_clients
 
-GEMINI_PROJECT_ID = "abc"
-GEMINI_LOCATION = "abc"
-GCP_CREDENTIALS = "abc"
+# _default_clients["ANDROID"]["context"]["client"]["clientVersion"] = "19.08.35"
+# _default_clients["IOS"]["context"]["client"]["clientVersion"] = "19.08.35"
+# _default_clients["ANDROID_EMBED"]["context"]["client"]["clientVersion"] = "19.08.35"
+# _default_clients["IOS_EMBED"]["context"]["client"]["clientVersion"] = "19.08.35"
+# _default_clients["IOS_MUSIC"]["context"]["client"]["clientVersion"] = "6.41"
+# _default_clients["ANDROID_MUSIC"] = _default_clients["ANDROID_CREATOR"]
+
+GEMINI_PROJECT_ID = "video-search-429010"
+GEMINI_LOCATION = "us-central1"
+GCP_CREDENTIALS = "video-search-429010-f06b9a02b80f.json"
 GEMINI_MODEL = "gemini-1.5-flash-001"
-GCP_BUCKET_NAME = "abc"
+GCP_BUCKET_NAME = "video-search-1"
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GCP_CREDENTIALS
 
 # vertexai.init(project=GEMINI_PROJECT_ID, location=GEMINI_LOCATION)
 # model = GenerativeModel(GEMINI_MODEL)
 
-topic = 'Football Rules'
+topic = 'Business Wars'
 max_results = 3
 
 def get_video_urls(topic, max_results):
@@ -75,40 +78,87 @@ def upload_to_gcs(bucket_name, blob_name, file_path):
     blob.upload_from_filename(file_path)
     logging.info(f"Uploaded to {bucket_name}/{blob_name}")
 
+# def DownloadAndUpload(link, bucket_name):
+#     youtubeObject = YouTube(link)
+#     stream = youtubeObject.streams.get_highest_resolution()
+#     video_id = youtubeObject.video_id
+#     try:
+#         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as tmp_file:
+#             stream.download(filename=tmp_file.name)
+#             # Upload to GCS
+#             blob_name = f"{video_id}.mp4"
+#             upload_to_gcs(bucket_name, blob_name, tmp_file.name)
+
+#         print(f"Download and upload completed successfully: {link}")
+#     except Exception as e:
+#         print(f"An error has occurred: {e}")
+#         logging.info(e)
+
 def DownloadAndUpload(link, bucket_name):
-    youtubeObject = YouTube(link)
-    stream = youtubeObject.streams.get_highest_resolution()
-    video_id = youtubeObject.video_id
     try:
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as tmp_file:
-            stream.download(filename=tmp_file.name)
-            # Upload to GCS
-            blob_name = f"{video_id}.mp4"
+        # Download transcript
+        video_id = YouTube(link).video_id
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+        
+        if not transcript:
+            logging.error(f"No transcript available for video: {video_id}")
+            return None
+
+        # Serialize transcript to JSON
+        transcript_data = json.dumps(transcript, indent=2)
+
+        # Upload to GCS
+        blob_name = f"{video_id}_transcript.json"
+        with tempfile.NamedTemporaryFile(delete=True) as tmp_file:
+            tmp_file.write(transcript_data.encode('utf-8'))
+            tmp_file.flush()  # Ensure all data is written before uploading
             upload_to_gcs(bucket_name, blob_name, tmp_file.name)
 
-        print(f"Download and upload completed successfully: {link}")
+        logging.info(f"Downloaded and uploaded transcript successfully for: {link}")
+        return transcript
     except Exception as e:
-        print(f"An error has occurred: {e}")
-        logging.info(e)
+        logging.error(f"An error occurred: {e}")
         
-def GenerateVideoDescription(video_file_uri):
-    # project_id = "your-project-id"  # Replace with your project ID
-    # vertexai.init(project='project_video-search-429010id', location="us-central1")
+# def GenerateVideoDescription(video_file_uri):
+#     # project_id = "your-project-id"  # Replace with your project ID
+#     # vertexai.init(project='project_video-search-429010id', location="us-central1")
 
+#     try:
+#         vertexai.init(project=GEMINI_PROJECT_ID, location=GEMINI_LOCATION)
+
+#         model = GenerativeModel(model_name=GEMINI_MODEL)
+
+#         prompt = """
+#         Provide a description of the video.
+#         The description should also contain anything important which people say in the video.
+#         """
+
+#         video_file = Part.from_uri(video_file_uri, mime_type="video/mp4")
+
+#         contents = [video_file, prompt]
+
+#         response = model.generate_content(contents)
+#         print(response.text)
+#         logging.info(response.text)
+#     except Exception as e:
+#         logging.error(f"An error occurred while generating video description: {e}")
+        
+def GenerateVideoDescription(transcript):
     try:
         vertexai.init(project=GEMINI_PROJECT_ID, location=GEMINI_LOCATION)
 
         model = GenerativeModel(model_name=GEMINI_MODEL)
 
         prompt = """
-        Provide a description of the video.
-        The description should also contain anything important which people say in the video.
+        Analyze the following transcript and provide the most interesting points and their timestamps where the range of each point sums to 45 seconds - 1 minute.
+        Provide the 3 best points...each point should be 45 seconds- 1 minute
         """
 
-        video_file = Part.from_uri(video_file_uri, mime_type="video/mp4")
+        # transcript_file = Part.from_uri(transcript_file_uri, mime_type="application/json")
+        
+        transcript_text = "\n".join([f"{item['start']} - {item['text']}" for item in transcript])
 
-        contents = [video_file, prompt]
-
+        contents = [transcript_text, prompt]
         response = model.generate_content(contents)
         print(response.text)
         logging.info(response.text)
@@ -117,13 +167,15 @@ def GenerateVideoDescription(video_file_uri):
 
 if __name__ == "__main__":
     video_ids = get_video_urls(topic, max_results)
-    time.sleep(10)
     print(video_ids)
     for video_id in video_ids:
         link = f"https://www.youtube.com/watch?v={video_id}"
         print(link)
-        DownloadAndUpload(link,GCP_BUCKET_NAME)
-        video_file_uri = f"gs://{GCP_BUCKET_NAME}/{video_id}.mp4"
-        GenerateVideoDescription(video_file_uri)
-    while True:
-        time.sleep(10)  # Keep the script running
+        transcript = DownloadAndUpload(link,GCP_BUCKET_NAME)
+        if transcript:
+            print("Entering the transcript processing block")
+            GenerateVideoDescription(transcript)
+        else:
+            print("Transcript is None, skipping to next video")
+    # while True:
+    #     time.sleep(1)  # Keep the script running
