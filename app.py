@@ -1,4 +1,5 @@
 import time
+import re
 import os
 import scrapetube
 from pytube import YouTube
@@ -9,15 +10,19 @@ import logging
 from google.cloud import storage
 from vertexai.generative_models import GenerativeModel, Part
 import json
+# from moviepy.editor import *
+from moviepy.video.io.ffmpeg_tools import ffmpeg_extract_subclip
 
-# from pytube.innertube import _default_clients
 
-# _default_clients["ANDROID"]["context"]["client"]["clientVersion"] = "19.08.35"
-# _default_clients["IOS"]["context"]["client"]["clientVersion"] = "19.08.35"
-# _default_clients["ANDROID_EMBED"]["context"]["client"]["clientVersion"] = "19.08.35"
-# _default_clients["IOS_EMBED"]["context"]["client"]["clientVersion"] = "19.08.35"
-# _default_clients["IOS_MUSIC"]["context"]["client"]["clientVersion"] = "6.41"
-# _default_clients["ANDROID_MUSIC"] = _default_clients["ANDROID_CREATOR"]
+
+from pytube.innertube import _default_clients
+
+_default_clients["ANDROID"]["context"]["client"]["clientVersion"] = "19.08.35"
+_default_clients["IOS"]["context"]["client"]["clientVersion"] = "19.08.35"
+_default_clients["ANDROID_EMBED"]["context"]["client"]["clientVersion"] = "19.08.35"
+_default_clients["IOS_EMBED"]["context"]["client"]["clientVersion"] = "19.08.35"
+_default_clients["IOS_MUSIC"]["context"]["client"]["clientVersion"] = "6.41"
+_default_clients["ANDROID_MUSIC"] = _default_clients["ANDROID_CREATOR"]
 
 GEMINI_PROJECT_ID = "video-search-429010"
 GEMINI_LOCATION = "us-central1"
@@ -29,7 +34,7 @@ os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GCP_CREDENTIALS
 # vertexai.init(project=GEMINI_PROJECT_ID, location=GEMINI_LOCATION)
 # model = GenerativeModel(GEMINI_MODEL)
 
-topic = 'Business Wars'
+topic = 'Ford Mustang Shelby'
 max_results = 3
 
 def get_video_urls(topic, max_results):
@@ -152,19 +157,78 @@ def GenerateVideoDescription(transcript):
         prompt = """
         Analyze the following transcript and provide the most interesting points and their timestamps where the range of each point sums to 45 seconds - 1 minute.
         Provide the 3 best points...each point should be 45 seconds- 1 minute
+        Let it be in the format sl number. **title** newline "Start" : starttime newline "End": endtime make sure it is in that format no stars should be added in the answer
         """
 
         # transcript_file = Part.from_uri(transcript_file_uri, mime_type="application/json")
         
         transcript_text = "\n".join([f"{item['start']} - {item['text']}" for item in transcript])
-
+        
         contents = [transcript_text, prompt]
         response = model.generate_content(contents)
+        
+        if not response:
+            logging.error(f"No transcript available for video: {video_id}")
+            return None
+        
         print(response.text)
         logging.info(response.text)
+        return response.text
     except Exception as e:
         logging.error(f"An error occurred while generating video description: {e}")
 
+def trim_video(video_path, start_time, end_time, output_path):
+    try:
+        logging.info(f"Trimming video from {start_time} to {end_time}")
+        ffmpeg_extract_subclip(video_path, start_time, end_time, targetname=output_path)
+        logging.info(f"Trimmed video from {start_time} to {end_time} and saved to {output_path}")
+    except Exception as e:
+        logging.error(f"An error occurred while trimming the video: {e}")
+
+def process_video_point(video_id, title, start, end, bucket_name):
+    try:
+        link = f"https://www.youtube.com/watch?v={video_id}"
+        youtubeObject = YouTube(link)
+        stream = youtubeObject.streams.get_highest_resolution()
+        
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_file:
+            video_path = tmp_file.name
+            logging.info(f"Downloading video to temporary file: {video_path}")
+            stream.download(filename=video_path)
+            logging.info("Video download completed.")
+            
+            # Trim the video based on the interesting points
+            output_path = os.path.join(tempfile.gettempdir(), f"{title}_trimmed_{int(start)}_{int(end)}.mp4")
+            logging.info(f"Trimming video and saving to: {output_path}")
+            trim_video(video_path, start, end, output_path)
+            logging.info("Video trimming completed.")
+            
+            # Upload the trimmed video to GCS
+            blob_name = f"{title}_trimmed_{int(start)}_{int(end)}.mp4"
+            logging.info(f"Uploading trimmed video to GCS: {bucket_name}/{blob_name}")
+            upload_to_gcs(bucket_name, blob_name, output_path)
+            logging.info("Trimmed video upload completed.")
+            
+            # Clean up the temporary video file
+            os.remove(video_path)
+            logging.info("Temporary video file removed.")
+    
+    except Exception as e:
+        logging.error(f"An error occurred while processing the point: {e}")
+
+def extract_timestamps(video_id, text):
+    points = []
+    pattern = r"\*\*(.*?)\*\*\s*\"Start\":\s*(\d+\.\d+)\s*\"End\":\s*(\d+\.\d+)"
+    matches = re.findall(pattern, text, re.DOTALL)
+    
+    for match in matches:
+        title = match[0].strip()
+        start = float(match[1])
+        end = float(match[2])
+        points.append((video_id, title, start, end))
+    
+    return points
+        
 if __name__ == "__main__":
     video_ids = get_video_urls(topic, max_results)
     print(video_ids)
@@ -172,10 +236,23 @@ if __name__ == "__main__":
         link = f"https://www.youtube.com/watch?v={video_id}"
         print(link)
         transcript = DownloadAndUpload(link,GCP_BUCKET_NAME)
+        all_points = []
         if transcript:
             print("Entering the transcript processing block")
-            GenerateVideoDescription(transcript)
+            response = GenerateVideoDescription(transcript)
+            if response:
+                point = extract_timestamps(video_id, response)
+                # print(points)
+                for video_id, title, start, end in point:
+                    try:
+                        print("process_video block")
+                        process_video_point(video_id, title, start, end, GCP_BUCKET_NAME)
+                    except Exception as e:
+                        logging.error(f"One error occurred while processing the point: {e}")
+            else:
+                print("No response from model, skipping to next video")
         else:
             print("Transcript is None, skipping to next video")
+        
     # while True:
     #     time.sleep(1)  # Keep the script running
