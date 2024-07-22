@@ -3,5 +3,5 @@ pytube==15.0.0
 youtube-transcript-api
 vertexai==1.43.0
 google.cloud
-python-ffmpeg
 moviepy
+python-ffmpeg-video-streaming>=0.1

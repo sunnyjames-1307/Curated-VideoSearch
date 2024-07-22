@@ -10,6 +10,8 @@ import logging
 from google.cloud import storage
 from vertexai.generative_models import GenerativeModel, Part
 import json
+import ffmpeg_streaming
+from ffmpeg_streaming import Formats, Bitrate, Representation, Size
 # from moviepy.editor import *
 from moviepy.video.io.ffmpeg_tools import ffmpeg_extract_subclip
 
@@ -184,6 +186,25 @@ def trim_video(video_path, start_time, end_time, output_path):
         logging.info(f"Trimmed video from {start_time} to {end_time} and saved to {output_path}")
     except Exception as e:
         logging.error(f"An error occurred while trimming the video: {e}")
+        
+def convert_to_hls(video_path, output_dir):
+    try:
+        _360p  = Representation(Size(640, 360), Bitrate(276 * 1024, 128 * 1024))
+        _480p  = Representation(Size(854, 480), Bitrate(750 * 1024, 192 * 1024))
+        _720p  = Representation(Size(1280, 720), Bitrate(2048 * 1024, 320 * 1024))
+
+        video = ffmpeg_streaming.input(video_path)
+        hls = video.hls(Formats.h264())
+        hls.representations(_360p, _480p, _720p)
+
+        hls_output_path = os.path.join(output_dir, "hls.m3u8")
+        hls.output(hls_output_path)
+
+        logging.info(f"Converted video to HLS segments in directory: {output_dir}")
+        return hls_output_path
+    except Exception as e:
+        logging.error(f"An error occurred while converting the video to HLS: {e}")
+        return None
 
 def process_video_point(video_id, title, start, end, bucket_name):
     try:
@@ -203,15 +224,34 @@ def process_video_point(video_id, title, start, end, bucket_name):
             trim_video(video_path, start, end, output_path)
             logging.info("Video trimming completed.")
             
-            # Upload the trimmed video to GCS
-            blob_name = f"{title}_trimmed_{int(start)}_{int(end)}.mp4"
-            logging.info(f"Uploading trimmed video to GCS: {bucket_name}/{blob_name}")
-            upload_to_gcs(bucket_name, blob_name, output_path)
-            logging.info("Trimmed video upload completed.")
+            # # Upload the trimmed video to GCS
+            # blob_name = f"{title}_trimmed_{int(start)}_{int(end)}.mp4"
+            # logging.info(f"Uploading trimmed video to GCS: {bucket_name}/{blob_name}")
+            # upload_to_gcs(bucket_name, blob_name, output_path)
+            # logging.info("Trimmed video upload completed.")
             
-            # Clean up the temporary video file
+            # # Clean up the temporary video file
+            # os.remove(video_path)
+            # logging.info("Temporary video file removed.")
+            trimmed_blob_name = f"{title}_trimmed_{int(start)}_{int(end)}.mp4"
+            upload_to_gcs(bucket_name, trimmed_blob_name, output_path)
+            
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                logging.info(f"Converting trimmed video to HLS segments in: {tmp_dir}")
+                hls_output_path = convert_to_hls(output_path, tmp_dir)
+                if hls_output_path:
+                    logging.info("Video conversion to HLS completed.")
+                    for segment in os.listdir(tmp_dir):
+                        segment_path = os.path.join(tmp_dir, segment)
+                        blob_name = f"{title}_trimmed_{int(start)}_{int(end)}/{segment}"
+                        logging.info(f"Uploading HLS segment to GCS: {bucket_name}/{blob_name}")
+                        upload_to_gcs(bucket_name, blob_name, segment_path)
+                        logging.info("HLS segment upload completed.")
+            
             os.remove(video_path)
             logging.info("Temporary video file removed.")
+            os.remove(output_path)
+            logging.info("Temporary trimmed video file removed.")
     
     except Exception as e:
         logging.error(f"An error occurred while processing the point: {e}")
